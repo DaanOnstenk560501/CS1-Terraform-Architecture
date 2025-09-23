@@ -63,3 +63,44 @@ resource "aws_internet_gateway" "production_igw" {
     Name = "production-igw"
   }
 }
+
+# Public Route Table
+resource "aws_route_table" "public_rt" {
+  vpc_id = aws_vpc.production.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.production_igw.id
+  }
+
+  tags = {
+    Name = "public-route-table"
+  }
+}
+
+# Private Route Table
+resource "aws_route_table" "private_rt" {
+  vpc_id = aws_vpc.production.id
+
+  tags = {
+    Name = "private-route-table"
+  }
+}
+
+# Associate public subnet with public route table
+resource "aws_route_table_association" "public_1_association" {
+  subnet_id      = aws_subnet.public_1.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+# Associate private app subnet with private route table
+resource "aws_route_table_association" "private_app_1_association" {
+  subnet_id      = aws_subnet.private_app_1.id
+  route_table_id = aws_route_table.private_rt.id
+}
+
+# Associate private db subnet with private route table
+resource "aws_route_table_association" "private_db_1_association" {
+  subnet_id      = aws_subnet.private_db_1.id
+  route_table_id = aws_route_table.private_rt.id
+}
