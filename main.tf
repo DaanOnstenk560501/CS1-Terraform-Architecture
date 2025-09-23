@@ -54,3 +54,12 @@ resource "aws_subnet" "private_db_1" {
     Name = "private-db-subnet-1"
   }
 }
+
+# Internet Gateway
+resource "aws_internet_gateway" "production_igw" {
+  vpc_id = aws_vpc.production.id
+
+  tags = {
+    Name = "production-igw"
+  }
+}
