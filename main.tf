@@ -102,6 +102,38 @@ resource "aws_internet_gateway" "shared_services_igw" {
   }
 }
 
+# Transit Gateway
+resource "aws_ec2_transit_gateway" "main" {
+  description                     = "Main Transit Gateway Hub"
+  default_route_table_association = "enable"
+  default_route_table_propagation = "enable"
+
+  tags = {
+    Name = "main-transit-gateway"
+  }
+}
+
+# Transit Gateway VPC Attachments
+resource "aws_ec2_transit_gateway_vpc_attachment" "production_attachment" {
+  subnet_ids         = [aws_subnet.private_app_1.id]
+  transit_gateway_id = aws_ec2_transit_gateway.main.id
+  vpc_id             = aws_vpc.production.id
+
+  tags = {
+    Name = "production-tgw-attachment"
+  }
+}
+
+resource "aws_ec2_transit_gateway_vpc_attachment" "shared_services_attachment" {
+  subnet_ids         = [aws_subnet.shared_private_1.id]
+  transit_gateway_id = aws_ec2_transit_gateway.main.id
+  vpc_id             = aws_vpc.shared_services.id
+
+  tags = {
+    Name = "shared-services-tgw-attachment"
+  }
+}
+
 # Production VPC Route Tables
 resource "aws_route_table" "public_rt" {
   vpc_id = aws_vpc.production.id
@@ -118,6 +150,11 @@ resource "aws_route_table" "public_rt" {
 
 resource "aws_route_table" "private_rt" {
   vpc_id = aws_vpc.production.id
+
+  route {
+    cidr_block         = "10.2.0.0/16"
+    transit_gateway_id = aws_ec2_transit_gateway.main.id
+  }
 
   tags = {
     Name = "private-route-table"
@@ -140,6 +177,11 @@ resource "aws_route_table" "shared_public_rt" {
 
 resource "aws_route_table" "shared_private_rt" {
   vpc_id = aws_vpc.shared_services.id
+
+  route {
+    cidr_block         = "10.1.0.0/16"
+    transit_gateway_id = aws_ec2_transit_gateway.main.id
+  }
 
   tags = {
     Name = "shared-private-route-table"
