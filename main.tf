@@ -22,7 +22,18 @@ resource "aws_vpc" "production" {
   }
 }
 
-# Public Subnet (for Load Balancer)
+# Shared Services VPC (for monitoring)
+resource "aws_vpc" "shared_services" {
+  cidr_block           = "10.2.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name = "shared-services-vpc"
+  }
+}
+
+# Production VPC Subnets
 resource "aws_subnet" "public_1" {
   vpc_id            = aws_vpc.production.id
   cidr_block        = "10.1.1.0/24"
@@ -33,7 +44,6 @@ resource "aws_subnet" "public_1" {
   }
 }
 
-# Private Subnet (for ECS containers)
 resource "aws_subnet" "private_app_1" {
   vpc_id            = aws_vpc.production.id
   cidr_block        = "10.1.11.0/24"
@@ -44,7 +54,6 @@ resource "aws_subnet" "private_app_1" {
   }
 }
 
-# Private Subnet (for database)
 resource "aws_subnet" "private_db_1" {
   vpc_id            = aws_vpc.production.id
   cidr_block        = "10.1.21.0/24"
@@ -55,7 +64,28 @@ resource "aws_subnet" "private_db_1" {
   }
 }
 
-# Internet Gateway
+# Shared Services VPC Subnets
+resource "aws_subnet" "shared_public_1" {
+  vpc_id            = aws_vpc.shared_services.id
+  cidr_block        = "10.2.1.0/24"
+  availability_zone = "eu-central-1a"
+
+  tags = {
+    Name = "shared-public-subnet-1"
+  }
+}
+
+resource "aws_subnet" "shared_private_1" {
+  vpc_id            = aws_vpc.shared_services.id
+  cidr_block        = "10.2.11.0/24"
+  availability_zone = "eu-central-1a"
+
+  tags = {
+    Name = "shared-private-subnet-1"
+  }
+}
+
+# Internet Gateways
 resource "aws_internet_gateway" "production_igw" {
   vpc_id = aws_vpc.production.id
 
@@ -64,7 +94,15 @@ resource "aws_internet_gateway" "production_igw" {
   }
 }
 
-# Public Route Table
+resource "aws_internet_gateway" "shared_services_igw" {
+  vpc_id = aws_vpc.shared_services.id
+
+  tags = {
+    Name = "shared-services-igw"
+  }
+}
+
+# Production VPC Route Tables
 resource "aws_route_table" "public_rt" {
   vpc_id = aws_vpc.production.id
 
@@ -78,7 +116,6 @@ resource "aws_route_table" "public_rt" {
   }
 }
 
-# Private Route Table
 resource "aws_route_table" "private_rt" {
   vpc_id = aws_vpc.production.id
 
@@ -87,20 +124,51 @@ resource "aws_route_table" "private_rt" {
   }
 }
 
-# Associate public subnet with public route table
+# Shared Services VPC Route Tables
+resource "aws_route_table" "shared_public_rt" {
+  vpc_id = aws_vpc.shared_services.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.shared_services_igw.id
+  }
+
+  tags = {
+    Name = "shared-public-route-table"
+  }
+}
+
+resource "aws_route_table" "shared_private_rt" {
+  vpc_id = aws_vpc.shared_services.id
+
+  tags = {
+    Name = "shared-private-route-table"
+  }
+}
+
+# Production VPC Route Table Associations
 resource "aws_route_table_association" "public_1_association" {
   subnet_id      = aws_subnet.public_1.id
   route_table_id = aws_route_table.public_rt.id
 }
 
-# Associate private app subnet with private route table
 resource "aws_route_table_association" "private_app_1_association" {
   subnet_id      = aws_subnet.private_app_1.id
   route_table_id = aws_route_table.private_rt.id
 }
 
-# Associate private db subnet with private route table
 resource "aws_route_table_association" "private_db_1_association" {
   subnet_id      = aws_subnet.private_db_1.id
   route_table_id = aws_route_table.private_rt.id
+}
+
+# Shared Services VPC Route Table Associations
+resource "aws_route_table_association" "shared_public_1_association" {
+  subnet_id      = aws_subnet.shared_public_1.id
+  route_table_id = aws_route_table.shared_public_rt.id
+}
+
+resource "aws_route_table_association" "shared_private_1_association" {
+  subnet_id      = aws_subnet.shared_private_1.id
+  route_table_id = aws_route_table.shared_private_rt.id
 }
