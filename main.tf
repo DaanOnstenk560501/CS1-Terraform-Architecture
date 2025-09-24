@@ -44,6 +44,16 @@ resource "aws_subnet" "public_1" {
   }
 }
 
+resource "aws_subnet" "public_2" {
+  vpc_id            = aws_vpc.production.id
+  cidr_block        = "10.1.2.0/24"
+  availability_zone = "eu-central-1b"
+
+  tags = {
+    Name = "public-subnet-2"
+  }
+}
+
 resource "aws_subnet" "private_app_1" {
   vpc_id            = aws_vpc.production.id
   cidr_block        = "10.1.11.0/24"
@@ -277,6 +287,62 @@ resource "aws_security_group" "monitoring_sg" {
   }
 }
 
+# Application Load Balancer
+resource "aws_lb" "main" {
+  name               = "main-application-load-balancer"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb_sg.id]
+  subnets            = [aws_subnet.public_1.id, aws_subnet.public_2.id]
+
+  enable_deletion_protection = false
+
+  tags = {
+    Name = "main-alb"
+  }
+}
+
+# ALB Target Group for Frontend
+resource "aws_lb_target_group" "frontend" {
+  name     = "frontend-target-group"
+  port     = 8080
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.production.id
+  target_type = "ip"
+
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    interval            = 30
+    matcher             = "200"
+    path                = "/"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    timeout             = 5
+    unhealthy_threshold = 2
+  }
+
+  tags = {
+    Name = "frontend-target-group"
+  }
+}
+
+# ALB Listener
+resource "aws_lb_listener" "frontend" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.frontend.arn
+  }
+
+  tags = {
+    Name = "frontend-listener"
+  }
+}
+
 # Production VPC Route Tables
 resource "aws_route_table" "public_rt" {
   vpc_id = aws_vpc.production.id
@@ -334,6 +400,11 @@ resource "aws_route_table" "shared_private_rt" {
 # Production VPC Route Table Associations
 resource "aws_route_table_association" "public_1_association" {
   subnet_id      = aws_subnet.public_1.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+resource "aws_route_table_association" "public_2_association" {
+  subnet_id      = aws_subnet.public_2.id
   route_table_id = aws_route_table.public_rt.id
 }
 
