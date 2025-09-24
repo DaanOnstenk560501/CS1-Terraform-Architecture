@@ -112,6 +112,25 @@ resource "aws_internet_gateway" "shared_services_igw" {
   }
 }
 
+# NAT Gateway for private subnets
+resource "aws_eip" "nat_eip" {
+  domain = "vpc"
+  tags = {
+    Name = "nat-gateway-eip"
+  }
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat_eip.id
+  subnet_id     = aws_subnet.public_1.id
+
+  tags = {
+    Name = "main-nat-gateway"
+  }
+
+  depends_on = [aws_internet_gateway.production_igw]
+}
+
 # Transit Gateway
 resource "aws_ec2_transit_gateway" "main" {
   description                     = "Main Transit Gateway Hub"
@@ -304,10 +323,10 @@ resource "aws_lb" "main" {
 
 # ALB Target Group for Frontend
 resource "aws_lb_target_group" "frontend" {
-  name     = "frontend-target-group"
-  port     = 8080
-  protocol = "HTTP"
-  vpc_id   = aws_vpc.production.id
+  name        = "frontend-target-group"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.production.id
   target_type = "ip"
 
   health_check {
@@ -343,6 +362,116 @@ resource "aws_lb_listener" "frontend" {
   }
 }
 
+# ECS Cluster
+resource "aws_ecs_cluster" "main" {
+  name = "main-cluster"
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+
+  tags = {
+    Name = "main-ecs-cluster"
+  }
+}
+
+# ECS Task Execution Role
+resource "aws_iam_role" "ecs_task_execution_role" {
+  name = "ecs-task-execution-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# ECS Task Definition for Frontend
+resource "aws_ecs_task_definition" "frontend" {
+  family                   = "frontend-task"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "frontend"
+      image     = "nginx:alpine"
+      essential = true
+      command   = ["sh", "-c", "sed -i 's/80/8080/g' /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
+      portMappings = [
+        {
+          containerPort = 8080
+        }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = "/ecs/frontend"
+          awslogs-region        = "eu-central-1"
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Name = "frontend-task-definition"
+  }
+}
+
+# CloudWatch Log Group for ECS
+resource "aws_cloudwatch_log_group" "ecs_frontend" {
+  name              = "/ecs/frontend"
+  retention_in_days = 30
+
+  tags = {
+    Name = "ecs-frontend-logs"
+  }
+}
+
+# ECS Service for Frontend
+resource "aws_ecs_service" "frontend" {
+  name            = "frontend-service"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.frontend.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = [aws_subnet.private_app_1.id]
+    security_groups  = [aws_security_group.ecs_frontend_sg.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.frontend.arn
+    container_name   = "frontend"
+    container_port   = 8080
+  }
+
+  depends_on = [aws_lb_listener.frontend]
+
+  tags = {
+    Name = "frontend-ecs-service"
+  }
+}
+
 # Production VPC Route Tables
 resource "aws_route_table" "public_rt" {
   vpc_id = aws_vpc.production.id
@@ -360,15 +489,23 @@ resource "aws_route_table" "public_rt" {
 resource "aws_route_table" "private_rt" {
   vpc_id = aws_vpc.production.id
 
-  route {
-    cidr_block         = "10.2.0.0/16"
-    transit_gateway_id = aws_ec2_transit_gateway.main.id
-  }
-
   tags = {
     Name = "private-route-table"
   }
 }
+
+# Separate route resources for private route table
+resource "aws_route" "private_nat_route" {
+  route_table_id         = aws_route_table.private_rt.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.main.id
+}
+
+ resource "aws_route" "private_tgw_route" {
+   route_table_id         = aws_route_table.private_rt.id
+   destination_cidr_block = "10.2.0.0/16"
+   transit_gateway_id     = aws_ec2_transit_gateway.main.id
+ }
 
 # Shared Services VPC Route Tables
 resource "aws_route_table" "shared_public_rt" {
