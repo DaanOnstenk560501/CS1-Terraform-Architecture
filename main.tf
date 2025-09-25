@@ -250,9 +250,9 @@ resource "aws_security_group" "ecs_backend_sg" {
   }
 }
 
-resource "aws_security_group" "rds_sg" {
-  name        = "rds-security-group"
-  description = "Security group for RDS database"
+resource "aws_security_group" "postgres_sg" {
+  name        = "postgres-security-group"
+  description = "Security group for PostgreSQL container"
   vpc_id      = aws_vpc.production.id
 
   ingress {
@@ -270,7 +270,7 @@ resource "aws_security_group" "rds_sg" {
   }
 
   tags = {
-    Name = "rds-security-group"
+    Name = "postgres-security-group"
   }
 }
 
@@ -280,13 +280,15 @@ resource "aws_security_group" "monitoring_sg" {
   description = "Security group for Prometheus and Grafana"
   vpc_id      = aws_vpc.shared_services.id
 
-  ingress {
+#Prometheus access
+  ingress { 
     from_port   = 9090
     to_port     = 9090
     protocol    = "tcp"
     cidr_blocks = ["10.1.0.0/16", "10.2.0.0/16"]
   }
 
+#Grafana access
   ingress {
     from_port   = 3000
     to_port     = 3000
@@ -435,13 +437,71 @@ resource "aws_ecs_task_definition" "frontend" {
   }
 }
 
-# CloudWatch Log Group for ECS
+# ECS Task Definition for PostgreSQL
+resource "aws_ecs_task_definition" "postgres" {
+  family                   = "postgres-task"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = 512
+  memory                   = 1024
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "postgres"
+      image     = "postgres:15-alpine"
+      essential = true
+      portMappings = [
+        {
+          containerPort = 5432
+        }
+      ]
+      environment = [
+        {
+          name  = "POSTGRES_DB"
+          value = "appdb"
+        },
+        {
+          name  = "POSTGRES_USER"
+          value = "dbadmin"
+        },
+        {
+          name  = "POSTGRES_PASSWORD"
+          value = "password123"
+        }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = "/ecs/postgres"
+          awslogs-region        = "eu-central-1"
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Name = "postgres-task-definition"
+  }
+}
+
+# CloudWatch Log Groups
 resource "aws_cloudwatch_log_group" "ecs_frontend" {
   name              = "/ecs/frontend"
   retention_in_days = 30
 
   tags = {
     Name = "ecs-frontend-logs"
+  }
+}
+
+resource "aws_cloudwatch_log_group" "ecs_postgres" {
+  name              = "/ecs/postgres"
+  retention_in_days = 30
+
+  tags = {
+    Name = "ecs-postgres-logs"
   }
 }
 
@@ -469,6 +529,25 @@ resource "aws_ecs_service" "frontend" {
 
   tags = {
     Name = "frontend-ecs-service"
+  }
+}
+
+# ECS Service for PostgreSQL
+resource "aws_ecs_service" "postgres" {
+  name            = "postgres-service"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.postgres.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = [aws_subnet.private_db_1.id]
+    security_groups  = [aws_security_group.postgres_sg.id]
+    assign_public_ip = false
+  }
+
+  tags = {
+    Name = "postgres-ecs-service"
   }
 }
 
@@ -501,11 +580,11 @@ resource "aws_route" "private_nat_route" {
   nat_gateway_id         = aws_nat_gateway.main.id
 }
 
- resource "aws_route" "private_tgw_route" {
-   route_table_id         = aws_route_table.private_rt.id
-   destination_cidr_block = "10.2.0.0/16"
-   transit_gateway_id     = aws_ec2_transit_gateway.main.id
- }
+resource "aws_route" "private_tgw_route" {
+  route_table_id         = aws_route_table.private_rt.id
+  destination_cidr_block = "10.2.0.0/16"
+  transit_gateway_id     = aws_ec2_transit_gateway.main.id
+}
 
 # Shared Services VPC Route Tables
 resource "aws_route_table" "shared_public_rt" {
