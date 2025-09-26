@@ -85,6 +85,16 @@ resource "aws_subnet" "shared_public_1" {
   }
 }
 
+resource "aws_subnet" "shared_public_2" {
+  vpc_id            = aws_vpc.shared_services.id
+  cidr_block        = "10.2.2.0/24"
+  availability_zone = "eu-central-1b"
+
+  tags = {
+    Name = "shared-public-subnet-2"
+  }
+}
+
 resource "aws_subnet" "shared_private_1" {
   vpc_id            = aws_vpc.shared_services.id
   cidr_block        = "10.2.11.0/24"
@@ -129,6 +139,25 @@ resource "aws_nat_gateway" "main" {
   }
 
   depends_on = [aws_internet_gateway.production_igw]
+}
+
+# NAT Gateway for Shared Services VPC
+resource "aws_eip" "shared_nat_eip" {
+  domain = "vpc"
+  tags = {
+    Name = "shared-nat-gateway-eip"
+  }
+}
+
+resource "aws_nat_gateway" "shared" {
+  allocation_id = aws_eip.shared_nat_eip.id
+  subnet_id     = aws_subnet.shared_public_1.id
+
+  tags = {
+    Name = "shared-nat-gateway"
+  }
+
+  depends_on = [aws_internet_gateway.shared_services_igw]
 }
 
 # Transit Gateway
@@ -280,15 +309,13 @@ resource "aws_security_group" "monitoring_sg" {
   description = "Security group for Prometheus and Grafana"
   vpc_id      = aws_vpc.shared_services.id
 
-#Prometheus access
-  ingress { 
+  ingress {
     from_port   = 9090
     to_port     = 9090
     protocol    = "tcp"
     cidr_blocks = ["10.1.0.0/16", "10.2.0.0/16"]
   }
 
-#Grafana access
   ingress {
     from_port   = 3000
     to_port     = 3000
@@ -308,6 +335,41 @@ resource "aws_security_group" "monitoring_sg" {
   }
 }
 
+# Security group for Grafana ALB
+resource "aws_security_group" "grafana_alb_sg" {
+  name        = "grafana-alb-security-group"
+  description = "Security group for Grafana Load Balancer"
+  vpc_id      = aws_vpc.shared_services.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "grafana-alb-security-group"
+  }
+}
+
+# Security group rule to allow ALB access to Grafana
+resource "aws_security_group_rule" "grafana_alb_access" {
+  type                     = "ingress"
+  from_port                = 3000
+  to_port                  = 3000
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.grafana_alb_sg.id
+  security_group_id        = aws_security_group.monitoring_sg.id
+}
+
 # Application Load Balancer
 resource "aws_lb" "main" {
   name               = "main-application-load-balancer"
@@ -320,6 +382,21 @@ resource "aws_lb" "main" {
 
   tags = {
     Name = "main-alb"
+  }
+}
+
+# ALB for Grafana
+resource "aws_lb" "grafana" {
+  name               = "grafana-load-balancer"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.grafana_alb_sg.id]
+  subnets            = [aws_subnet.shared_public_1.id, aws_subnet.shared_public_2.id]
+
+  enable_deletion_protection = false
+
+  tags = {
+    Name = "grafana-alb"
   }
 }
 
@@ -348,6 +425,31 @@ resource "aws_lb_target_group" "frontend" {
   }
 }
 
+# Target Group for Grafana
+resource "aws_lb_target_group" "grafana" {
+  name        = "grafana-target-group"
+  port        = 3000
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.shared_services.id
+  target_type = "ip"
+
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    interval            = 30
+    matcher             = "200"
+    path                = "/login"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    timeout             = 5
+    unhealthy_threshold = 2
+  }
+
+  tags = {
+    Name = "grafana-target-group"
+  }
+}
+
 # ALB Listener
 resource "aws_lb_listener" "frontend" {
   load_balancer_arn = aws_lb.main.arn
@@ -361,6 +463,22 @@ resource "aws_lb_listener" "frontend" {
 
   tags = {
     Name = "frontend-listener"
+  }
+}
+
+# ALB Listener for Grafana
+resource "aws_lb_listener" "grafana" {
+  load_balancer_arn = aws_lb.grafana.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.grafana.arn
+  }
+
+  tags = {
+    Name = "grafana-listener"
   }
 }
 
@@ -486,6 +604,90 @@ resource "aws_ecs_task_definition" "postgres" {
   }
 }
 
+# ECS Task Definition for Prometheus
+resource "aws_ecs_task_definition" "prometheus" {
+  family                   = "prometheus-task"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = 512
+  memory                   = 1024
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "prometheus"
+      image     = "prom/prometheus:latest"
+      essential = true
+      portMappings = [
+        {
+          containerPort = 9090
+        }
+      ]
+      command = [
+        "--config.file=/etc/prometheus/prometheus.yml",
+        "--storage.tsdb.path=/prometheus/",
+        "--web.console.libraries=/etc/prometheus/console_libraries",
+        "--web.console.templates=/etc/prometheus/consoles",
+        "--storage.tsdb.retention.time=200h",
+        "--web.enable-lifecycle"
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = "/ecs/prometheus"
+          awslogs-region        = "eu-central-1"
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Name = "prometheus-task-definition"
+  }
+}
+
+# ECS Task Definition for Grafana
+resource "aws_ecs_task_definition" "grafana" {
+  family                   = "grafana-task"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "grafana"
+      image     = "grafana/grafana:latest"
+      essential = true
+      portMappings = [
+        {
+          containerPort = 3000
+        }
+      ]
+      environment = [
+        {
+          name  = "GF_SECURITY_ADMIN_PASSWORD"
+          value = "admin123"
+        }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = "/ecs/grafana"
+          awslogs-region        = "eu-central-1"
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Name = "grafana-task-definition"
+  }
+}
+
 # CloudWatch Log Groups
 resource "aws_cloudwatch_log_group" "ecs_frontend" {
   name              = "/ecs/frontend"
@@ -502,6 +704,24 @@ resource "aws_cloudwatch_log_group" "ecs_postgres" {
 
   tags = {
     Name = "ecs-postgres-logs"
+  }
+}
+
+resource "aws_cloudwatch_log_group" "ecs_prometheus" {
+  name              = "/ecs/prometheus"
+  retention_in_days = 30
+
+  tags = {
+    Name = "ecs-prometheus-logs"
+  }
+}
+
+resource "aws_cloudwatch_log_group" "ecs_grafana" {
+  name              = "/ecs/grafana"
+  retention_in_days = 30
+
+  tags = {
+    Name = "ecs-grafana-logs"
   }
 }
 
@@ -548,6 +768,52 @@ resource "aws_ecs_service" "postgres" {
 
   tags = {
     Name = "postgres-ecs-service"
+  }
+}
+
+# ECS Service for Prometheus
+resource "aws_ecs_service" "prometheus" {
+  name            = "prometheus-service"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.prometheus.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = [aws_subnet.shared_private_1.id]
+    security_groups  = [aws_security_group.monitoring_sg.id]
+    assign_public_ip = false
+  }
+
+  tags = {
+    Name = "prometheus-ecs-service"
+  }
+}
+
+# ECS Service for Grafana
+resource "aws_ecs_service" "grafana" {
+  name            = "grafana-service"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.grafana.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = [aws_subnet.shared_private_1.id]
+    security_groups  = [aws_security_group.monitoring_sg.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.grafana.arn
+    container_name   = "grafana"
+    container_port   = 3000
+  }
+
+  depends_on = [aws_lb_listener.grafana]
+
+  tags = {
+    Name = "grafana-ecs-service"
   }
 }
 
@@ -604,6 +870,11 @@ resource "aws_route_table" "shared_private_rt" {
   vpc_id = aws_vpc.shared_services.id
 
   route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.shared.id
+  }
+
+  route {
     cidr_block         = "10.1.0.0/16"
     transit_gateway_id = aws_ec2_transit_gateway.main.id
   }
@@ -637,6 +908,11 @@ resource "aws_route_table_association" "private_db_1_association" {
 # Shared Services VPC Route Table Associations
 resource "aws_route_table_association" "shared_public_1_association" {
   subnet_id      = aws_subnet.shared_public_1.id
+  route_table_id = aws_route_table.shared_public_rt.id
+}
+
+resource "aws_route_table_association" "shared_public_2_association" {
+  subnet_id      = aws_subnet.shared_public_2.id
   route_table_id = aws_route_table.shared_public_rt.id
 }
 
